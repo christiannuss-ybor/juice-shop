@@ -1,6 +1,5 @@
 import { Component, NgZone, type OnDestroy, type OnInit, inject, AfterViewInit } from '@angular/core'
 import { ActivatedRoute, Router } from '@angular/router'
-import { DomSanitizer } from '@angular/platform-browser'
 import { MatDialog } from '@angular/material/dialog'
 import { type Subscription, combineLatest, firstValueFrom } from 'rxjs'
 
@@ -48,7 +47,6 @@ export class ScoreBoardComponent implements OnInit, OnDestroy, AfterViewInit {
   private readonly challengeService = inject(ChallengeService)
   private readonly hintService = inject(HintService)
   private readonly configurationService = inject(ConfigurationService)
-  private readonly sanitizer = inject(DomSanitizer)
   private readonly ngZone = inject(NgZone)
   private readonly io = inject(SocketIoService)
   private readonly dialog = inject(MatDialog)
@@ -83,7 +81,9 @@ export class ScoreBoardComponent implements OnInit, OnDestroy, AfterViewInit {
           hintsAvailable: hints.filter((hint) => hint.ChallengeId === challenge.id).length,
           tagList: challenge.tags ? challenge.tags.split(',').map((tag) => tag.trim()) : [],
           originalDescription: challenge.description as string,
-          description: this.sanitizer.bypassSecurityTrustHtml(challenge.description as string)
+          // Angular's default [innerHTML] sanitizer scrubs script/event handlers,
+          // so we no longer wrap the description in bypassSecurityTrustHtml.
+          description: challenge.description as string
         }
       })
 

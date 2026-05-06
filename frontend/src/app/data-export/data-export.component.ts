@@ -7,7 +7,6 @@ import { Component, type OnInit, inject } from '@angular/core'
 import { UntypedFormControl, Validators, FormsModule, ReactiveFormsModule } from '@angular/forms'
 import { ImageCaptchaService } from '../Services/image-captcha.service'
 import { DataSubjectService } from '../Services/data-subject.service'
-import { DomSanitizer } from '@angular/platform-browser'
 import { MatButtonModule } from '@angular/material/button'
 import { MatInputModule } from '@angular/material/input'
 import { MatLabel, MatFormFieldModule, MatHint, MatError } from '@angular/material/form-field'
@@ -25,13 +24,12 @@ import { MatIconModule } from '@angular/material/icon'
   imports: [MatCardModule, TranslateModule, MatRadioGroup, FormsModule, ReactiveFormsModule, MatLabel, MatRadioButton, MatFormFieldModule, MatInputModule, MatHint, MatError, MatButtonModule, MatIconModule]
 })
 export class DataExportComponent implements OnInit {
-  sanitizer = inject(DomSanitizer)
   private readonly imageCaptchaService = inject(ImageCaptchaService)
   private readonly dataSubjectService = inject(DataSubjectService)
 
   public captchaControl: UntypedFormControl = new UntypedFormControl('', [Validators.required, Validators.minLength(5)])
   public formatControl: UntypedFormControl = new UntypedFormControl('', [Validators.required])
-  public captcha: any
+  public captcha?: string
   private dataRequest: any = undefined
   public confirmation: any
   public error: any
@@ -54,7 +52,10 @@ export class DataExportComponent implements OnInit {
 
   getNewCaptcha () {
     this.imageCaptchaService.getCaptcha().subscribe((data: any) => {
-      this.captcha = this.sanitizer.bypassSecurityTrustHtml(data.image)
+      // Render the captcha SVG inside an <img> via a data URL so it cannot
+      // execute scripts in the host document.
+      const svg = String(data?.image ?? '')
+      this.captcha = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
     })
   }
 
@@ -68,7 +69,11 @@ export class DataExportComponent implements OnInit {
         this.error = null
         this.confirmation = data.confirmation
         this.userData = data.userData
-        window.open('', '_blank', 'width=500')?.document.write(this.userData)
+        // Open the export as a Blob URL so the receiving window cannot script
+        // back into this document via document.write.
+        const blob = new Blob([String(this.userData ?? '')], { type: 'text/plain' })
+        const url = URL.createObjectURL(blob)
+        window.open(url, '_blank', 'noopener,noreferrer,width=500')
         this.lastSuccessfulTry = new Date()
         localStorage.setItem('lstdtxprt', JSON.stringify(this.lastSuccessfulTry))
         this.ngOnInit()
