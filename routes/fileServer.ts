@@ -7,46 +7,45 @@ import path from 'node:path'
 import { type Request, type Response, type NextFunction } from 'express'
 
 import * as utils from '../lib/utils'
-import * as security from '../lib/insecurity'
-import { challenges } from '../data/datacache'
-import * as challengeUtils from '../lib/challengeUtils'
+
+const FTP_ROOT = path.resolve('ftp')
+
+const ALLOWED_FILES = new Set([
+  'announcement_encrypted.md',
+  'legal.md',
+  'package.json',
+  'incident-support.kdbx'
+])
 
 export function servePublicFiles () {
-  return ({ params, query }: Request, res: Response, next: NextFunction) => {
-    const file = params.file
-
-    if (!file.includes('/')) {
-      verify(file, res, next)
-    } else {
+  return ({ params }: Request, res: Response, next: NextFunction) => {
+    const requestedRaw = String(params.file ?? '')
+    if (!requestedRaw) {
       res.status(403)
-      next(new Error('File names cannot contain forward slashes!'))
+      next(new Error('Forbidden'))
+      return
     }
-  }
-
-  function verify (file: string, res: Response, next: NextFunction) {
-    if (file && (endsWithAllowlistedFileType(file) || (file === 'incident-support.kdbx'))) {
-      file = security.cutOffPoisonNullByte(file)
-
-      challengeUtils.solveIf(challenges.directoryListingChallenge, () => { return file.toLowerCase() === 'acquisitions.md' })
-      verifySuccessfulPoisonNullByteExploit(file)
-
-      res.sendFile(path.resolve('ftp/', file))
-    } else {
+    const requested = decodeURIComponent(requestedRaw)
+    if (requested.includes('/') || requested.includes('\\') || requested.includes('\0') || requested.includes('%00')) {
       res.status(403)
-      next(new Error('Only .md and .pdf files are allowed!'))
+      next(new Error('Invalid file name'))
+      return
     }
-  }
 
-  function verifySuccessfulPoisonNullByteExploit (file: string) {
-    challengeUtils.solveIf(challenges.easterEggLevelOneChallenge, () => { return file.toLowerCase() === 'eastere.gg' })
-    challengeUtils.solveIf(challenges.forgottenDevBackupChallenge, () => { return file.toLowerCase() === 'package.json.bak' })
-    challengeUtils.solveIf(challenges.forgottenBackupChallenge, () => { return file.toLowerCase() === 'coupons_2013.md.bak' })
-    challengeUtils.solveIf(challenges.misplacedSignatureFileChallenge, () => { return file.toLowerCase() === 'suspicious_errors.yml' })
+    if (!ALLOWED_FILES.has(requested) && !endsWithAllowlistedFileType(requested)) {
+      res.status(403)
+      next(new Error('Only specifically published .md and .pdf files are allowed.'))
+      return
+    }
 
-    challengeUtils.solveIf(challenges.nullByteChallenge, () => {
-      return challenges.easterEggLevelOneChallenge.solved || challenges.forgottenDevBackupChallenge.solved || challenges.forgottenBackupChallenge.solved ||
-        challenges.misplacedSignatureFileChallenge.solved || file.toLowerCase() === 'encrypt.pyc'
-    })
+    const resolved = path.resolve(FTP_ROOT, requested)
+    if (!resolved.startsWith(FTP_ROOT + path.sep) && resolved !== FTP_ROOT) {
+      res.status(403)
+      next(new Error('Path traversal blocked'))
+      return
+    }
+
+    res.sendFile(resolved)
   }
 
   function endsWithAllowlistedFileType (param: string) {

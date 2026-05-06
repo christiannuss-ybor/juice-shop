@@ -4,39 +4,38 @@
  */
 
 import { type Request, type Response, type NextFunction } from 'express'
-import * as challengeUtils from '../lib/challengeUtils'
-import { challenges } from '../data/datacache'
+import * as utils from '../lib/utils'
 import { UserModel } from '../models/user'
 import * as security from '../lib/insecurity'
 
 export function changePassword () {
-  return async ({ query, headers, connection }: Request, res: Response, next: NextFunction) => {
-    const currentPassword = query.current as string
-    const newPassword = query.new as string
-    const newPasswordInString = newPassword?.toString()
-    const repeatPassword = query.repeat
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const source = req.method === 'POST' ? (req.body ?? {}) : (req.query ?? {})
+    const currentPassword = typeof source.current === 'string' ? source.current : ''
+    const newPassword = typeof source.new === 'string' ? source.new : ''
+    const repeatPassword = typeof source.repeat === 'string' ? source.repeat : ''
 
     if (!newPassword || newPassword === 'undefined') {
-      res.status(401).send(res.__('Password cannot be empty.'))
+      res.status(400).send(res.__('Password cannot be empty.'))
       return
-    } else if (newPassword !== repeatPassword) {
-      res.status(401).send(res.__('New and repeated password do not match.'))
+    }
+    if (newPassword !== repeatPassword) {
+      res.status(400).send(res.__('New and repeated password do not match.'))
+      return
+    }
+    if (newPassword.length < 8) {
+      res.status(400).send(res.__('Password must be at least 8 characters long.'))
       return
     }
 
-    const token = headers.authorization ? headers.authorization.substr('Bearer='.length) : null
-    if (token === null) {
-      next(new Error('Blocked illegal activity by ' + connection.remoteAddress))
-      return
-    }
-
-    const loggedInUser = security.authenticatedUsers.get(token)
+    const token = utils.jwtFrom(req)
+    const loggedInUser = token ? security.authenticatedUsers.get(token) : undefined
     if (!loggedInUser) {
-      next(new Error('Blocked illegal activity by ' + connection.remoteAddress))
+      res.status(401).send(res.__('You are not logged in.'))
       return
     }
 
-    if (currentPassword && security.hash(currentPassword) !== loggedInUser.data.password) {
+    if (!currentPassword || !security.verifyPassword(currentPassword, loggedInUser.data.password)) {
       res.status(401).send(res.__('Current password is not correct.'))
       return
     }
@@ -47,13 +46,8 @@ export function changePassword () {
         res.status(404).send(res.__('User not found.'))
         return
       }
-
-      await user.update({ password: newPasswordInString })
-      challengeUtils.solveIf(
-        challenges.changePasswordBenderChallenge,
-        () => user.id === 3 && !currentPassword && user.password === security.hash('slurmCl4ssic')
-      )
-      res.json({ user })
+      await user.update({ password: newPassword })
+      res.json({ user: { id: user.id, email: user.email } })
     } catch (error) {
       next(error)
     }
