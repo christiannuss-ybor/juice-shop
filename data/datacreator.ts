@@ -33,8 +33,18 @@ import { ordersCollection, reviewsCollection } from './mongodb'
 import { AllHtmlEntities as Entities } from 'html-entities'
 import * as datacache from './datacache'
 import * as security from '../lib/insecurity'
-// @ts-expect-error FIXME due to non-existing type definitions for replace
-import replace from 'replace'
+import { readFileSync, writeFileSync } from 'node:fs'
+
+interface ReplaceOpts { regex: string | RegExp, replacement: string, paths: string[] }
+const replace = ({ regex, replacement, paths }: ReplaceOpts) => {
+  for (const p of paths) {
+    try {
+      const content = readFileSync(p, 'utf8')
+      const next = content.replace(typeof regex === 'string' ? new RegExp(regex, 'g') : regex, replacement)
+      if (next !== content) writeFileSync(p, next)
+    } catch { /* ignore — file may not exist */ }
+  }
+}
 
 const entities = new Entities()
 
@@ -739,8 +749,6 @@ async function prepareFilesystem () {
   replace({
     regex: 'http://localhost:3000',
     replacement: config.get<string>('server.baseUrl'),
-    paths: ['.well-known/csaf/provider-metadata.json'],
-    recursive: true,
-    silent: true
+    paths: ['.well-known/csaf/provider-metadata.json']
   })
 }

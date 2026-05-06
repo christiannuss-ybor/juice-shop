@@ -6,8 +6,17 @@
 import fs from 'node:fs'
 import config from 'config'
 import * as utils from '../utils'
-// @ts-expect-error FIXME due to non-existing type definitions for replace
-import replace from 'replace'
+
+interface ReplaceOpts { regex: RegExp, replacement: string, paths: string[] }
+const replace = ({ regex, replacement, paths }: ReplaceOpts) => {
+  for (const p of paths) {
+    try {
+      const content = fs.readFileSync(p, 'utf8')
+      const next = content.replace(regex, replacement)
+      if (next !== content) fs.writeFileSync(p, next)
+    } catch { /* ignore — file may not exist in some environments */ }
+  }
+}
 
 const customizeApplication = async () => {
   if (config.get<string>('application.name')) {
@@ -56,9 +65,7 @@ const customizeFavicon = async () => {
   replace({
     regex: /type="image\/x-icon" href="assets\/public\/.*"/,
     replacement: `type="image/x-icon" href="assets/public/${favicon}"`,
-    paths: ['frontend/dist/frontend/index.html'],
-    recursive: false,
-    silent: true
+    paths: ['frontend/dist/frontend/index.html']
   })
 }
 
@@ -85,9 +92,7 @@ const customizeTitle = () => {
   replace({
     regex: /<title>.*<\/title>/,
     replacement: title,
-    paths: ['frontend/dist/frontend/index.html'],
-    recursive: false,
-    silent: true
+    paths: ['frontend/dist/frontend/index.html']
   })
 }
 
@@ -96,9 +101,7 @@ const customizeTheme = () => {
   replace({
     regex: /"mat-app-background mat-typography .*-theme"/,
     replacement: bodyClass,
-    paths: ['frontend/dist/frontend/index.html'],
-    recursive: false,
-    silent: true
+    paths: ['frontend/dist/frontend/index.html']
   })
 }
 
@@ -107,9 +110,7 @@ const customizeCookieConsentBanner = () => {
   replace({
     regex: /"content": { "message": ".*", "dismiss": ".*", "link": ".*", "href": ".*" }/,
     replacement: contentProperty,
-    paths: ['frontend/dist/frontend/index.html'],
-    recursive: false,
-    silent: true
+    paths: ['frontend/dist/frontend/index.html']
   })
 }
 

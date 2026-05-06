@@ -3,10 +3,20 @@
  * SPDX-License-Identifier: MIT
  */
 
+import fs from 'node:fs'
 import config from 'config'
 import * as utils from '../utils'
-// @ts-expect-error FIXME due to non-existing type definitions for replace
-import replace from 'replace'
+
+interface ReplaceOpts { regex: RegExp, replacement: string, paths: string[] }
+const replace = ({ regex, replacement, paths }: ReplaceOpts) => {
+  for (const p of paths) {
+    try {
+      const content = fs.readFileSync(p, 'utf8')
+      const next = content.replace(regex, replacement)
+      if (next !== content) fs.writeFileSync(p, next)
+    } catch { /* ignore — file may not exist */ }
+  }
+}
 
 const customizeEasterEgg = async () => {
   if (config.has('application.easterEggPlanet.overlayMap')) {
@@ -28,9 +38,7 @@ const replaceImagePath = (overlay: string) => {
   replace({
     regex: /orangeTexture = .*;/,
     replacement: textureDeclaration,
-    paths: ['frontend/dist/frontend/assets/private/threejs-demo.html'],
-    recursive: false,
-    silent: true
+    paths: ['frontend/dist/frontend/assets/private/threejs-demo.html']
   })
 }
 
@@ -39,9 +47,7 @@ const replaceThreeJsTitleTag = () => {
   replace({
     regex: /<title>.*<\/title>/,
     replacement: threeJsTitleTag,
-    paths: ['frontend/dist/frontend/assets/private/threejs-demo.html'],
-    recursive: false,
-    silent: true
+    paths: ['frontend/dist/frontend/assets/private/threejs-demo.html']
   })
 }
 
