@@ -3,13 +3,10 @@
  * SPDX-License-Identifier: MIT
  */
 import express, { type NextFunction, type Request, type Response } from 'express'
-import path from 'node:path'
 
 import { SecurityQuestionModel } from '../models/securityQuestion'
 import { PrivacyRequestModel } from '../models/privacyRequests'
 import { SecurityAnswerModel } from '../models/securityAnswer'
-import * as challengeUtils from '../lib/challengeUtils'
-import { challenges } from '../data/datacache'
 import * as security from '../lib/insecurity'
 import { UserModel } from '../models/user'
 
@@ -65,29 +62,13 @@ router.post('/', async (req: Request<Record<string, unknown>, Record<string, unk
     })
 
     res.clearCookie('token')
-    if (req.body.layout) {
-      const filePath: string = path.resolve(req.body.layout).toLowerCase()
-      const isForbiddenFile: boolean = (filePath.includes('ftp') || filePath.includes('ctf.key') || filePath.includes('encryptionkeys'))
-      if (!isForbiddenFile) {
-        res.render('dataErasureResult', {
-          ...req.body
-        }, (error, html) => {
-          if (!html || error) {
-            next(new Error(error.message))
-          } else {
-            const sendlfrResponse: string = html.slice(0, 100) + '......'
-            res.send(sendlfrResponse)
-            challengeUtils.solveIf(challenges.lfrChallenge, () => { return true })
-          }
-        })
-      } else {
-        next(new Error('File access not allowed'))
-      }
-    } else {
-      res.render('dataErasureResult', {
-        ...req.body
-      })
-    }
+    // Render only the static erasure-result template; never let the client
+    // pick which template / layout file gets rendered (was a local-file-read
+    // vector on the previous "layout" parameter).
+    res.render('dataErasureResult', {
+      email: req.body.email,
+      securityAnswer: req.body.securityAnswer
+    })
   } catch (error) {
     next(error)
   }

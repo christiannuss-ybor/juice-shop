@@ -14,7 +14,6 @@ import http from 'node:http'
 import path from 'node:path'
 import express from 'express'
 import colors from 'colors/safe'
-import serveIndex from 'serve-index'
 import bodyParser from 'body-parser'
 // @ts-expect-error FIXME due to non-existing type definitions for finale-rest
 import * as finale from 'finale-rest'
@@ -82,7 +81,6 @@ import { retrieveBasket } from './routes/basket'
 import { searchProducts } from './routes/search'
 import { trackOrder } from './routes/trackOrder'
 import { saveLoginIp } from './routes/saveLoginIp'
-import { serveKeyFiles } from './routes/keyServer'
 import * as basketItems from './routes/basketItems'
 import { performRedirect } from './routes/redirect'
 import { serveEasterEgg } from './routes/easterEgg'
@@ -90,7 +88,6 @@ import { getLanguageList } from './routes/languages'
 import { getUserProfile } from './routes/userProfile'
 import { serveAngularClient } from './routes/angular'
 import { resetPassword } from './routes/resetPassword'
-import { serveLogFiles } from './routes/logfileServer'
 import { servePublicFiles } from './routes/fileServer'
 import { addMemory, getMemories } from './routes/memory'
 import { changePassword } from './routes/changePassword'
@@ -177,26 +174,56 @@ restoreOverwrittenFilesWithOriginals().then(() => {
   /* Compression for all requests */
   app.use(compression())
 
-  /* Bludgeon solution for possible CORS problems: Allow everything! */
-  app.options('*', cors())
-  app.use(cors())
+  /* CORS: only allow explicitly configured origins (set CORS_ORIGINS as a
+     comma-separated allowlist). Same-origin requests are always allowed. */
+  const corsAllowlist = (process.env.CORS_ORIGINS ?? '').split(',').map(o => o.trim()).filter(Boolean)
+  const corsOptions: cors.CorsOptions = {
+    origin: (origin, cb) => {
+      if (!origin) {
+        cb(null, true)
+        return
+      }
+      if (corsAllowlist.includes(origin)) {
+        cb(null, true)
+        return
+      }
+      cb(new Error('CORS: origin not allowed'))
+    },
+    credentials: true
+  }
+  app.options('*', cors(corsOptions))
+  app.use(cors(corsOptions))
 
   /* Security middleware */
   app.use(helmet.noSniff())
-  app.use(helmet.frameguard())
-  // app.use(helmet.xssFilter()); // = no protection from persisted XSS via RESTful API
+  app.use(helmet.frameguard({ action: 'deny' }))
+  app.use(helmet.hidePoweredBy())
+  app.use(helmet.referrerPolicy({ policy: 'no-referrer' }))
+  app.use(helmet.dnsPrefetchControl({ allow: false }))
+  app.use(helmet.permittedCrossDomainPolicies({ permittedPolicies: 'none' }))
+  if (process.env.NODE_ENV === 'production') {
+    app.use(helmet.hsts({ maxAge: 31536000, includeSubDomains: true, preload: false }))
+  }
+  app.use(helmet.contentSecurityPolicy({
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      fontSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      frameAncestors: ["'none'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"]
+    }
+  }))
   app.disable('x-powered-by')
   app.use(featurePolicy({
     features: {
       payment: ["'self'"]
     }
   }))
-
-  /* Hiring header */
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    res.append('X-Recruiting', config.get('application.securityTxt.hiring'))
-    next()
-  })
 
   /* Remove duplicate slashes from URL which allowed bypassing subsequent filters */
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -236,58 +263,25 @@ restoreOverwrittenFilesWithOriginals().then(() => {
   /* Checks for challenges solved by abusing SSTi and SSRF bugs */
   app.use('/solve/challenges/server-side', verify.serverSideChallenges())
 
-  /* Create middleware to change paths from the serve-index plugin from absolute to relative */
-  const serveIndexMiddleware = (req: Request, res: Response, next: NextFunction) => {
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    const origEnd = res.end
-    // @ts-expect-error FIXME assignment broken due to seemingly void return value
-    res.end = function () {
-      if (arguments.length) {
-        const reqPath = req.originalUrl.replace(/\?.*$/, '')
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        const currentFolder = reqPath.split('/').pop()!
-        arguments[0] = arguments[0].replace(/a href="([^"]+?)"/gi, function (matchString: string, matchedUrl: string) {
-          let relativePath = path.relative(reqPath, matchedUrl)
-          if (relativePath === '') {
-            relativePath = currentFolder
-          } else if (!relativePath.startsWith('.') && currentFolder !== '') {
-            relativePath = currentFolder + '/' + relativePath
-          } else {
-            relativePath = relativePath.replace('..', '.')
-          }
-          return 'a href="' + relativePath + '"'
-        })
-      }
-      // @ts-expect-error FIXME passed argument has wrong type
-      origEnd.apply(this, arguments)
-    }
-    next()
-  }
+  // FTP-style file download — only the explicit allowlist in servePublicFiles
+  // is exposed; directory browsing is disabled.
+  app.use('/ftp(?!/quarantine)/:file', servePublicFiles())
+  app.use('/ftp/quarantine/:file', serveQuarantineFiles())
+  app.use('/ftp', (req: Request, res: Response) => { res.status(404).end() })
 
-  // vuln-code-snippet start directoryListingChallenge accessLogDisclosureChallenge
-  /* /ftp directory browsing and file download */ // vuln-code-snippet neutral-line directoryListingChallenge
-  app.use('/ftp', serveIndexMiddleware, serveIndex('ftp', { icons: true })) // vuln-code-snippet vuln-line directoryListingChallenge
-  app.use('/ftp(?!/quarantine)/:file', servePublicFiles()) // vuln-code-snippet vuln-line directoryListingChallenge
-  app.use('/ftp/quarantine/:file', serveQuarantineFiles()) // vuln-code-snippet neutral-line directoryListingChallenge
-
-  app.use('/.well-known', serveIndexMiddleware, serveIndex('.well-known', { icons: true, view: 'details' }))
   app.use('/.well-known', express.static('.well-known'))
 
-  /* /encryptionkeys directory browsing */
-  app.use('/encryptionkeys', serveIndexMiddleware, serveIndex('encryptionkeys', { icons: true, view: 'details' }))
-  app.use('/encryptionkeys/:file', serveKeyFiles())
+  // Encryption keys must never be browseable or directly served.
+  app.use('/encryptionkeys', (req: Request, res: Response) => { res.status(404).end() })
 
-  /* /logs directory browsing */ // vuln-code-snippet neutral-line accessLogDisclosureChallenge
-  app.use('/support/logs', serveIndexMiddleware, serveIndex('logs', { icons: true, view: 'details' })) // vuln-code-snippet vuln-line accessLogDisclosureChallenge
-  app.use('/support/logs', verify.accessControlChallenges()) // vuln-code-snippet hide-line
-  app.use('/support/logs/:file', serveLogFiles()) // vuln-code-snippet vuln-line accessLogDisclosureChallenge
+  // Server-side log access is disabled entirely.
+  app.use('/support/logs', (req: Request, res: Response) => { res.status(404).end() })
 
-  /* Swagger documentation for B2B v2 endpoints */
-  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument))
+  // Swagger UI is admin-gated to avoid leaking the internal API surface.
+  app.use('/api-docs', security.isAdmin(), swaggerUi.serve, swaggerUi.setup(swaggerDocument))
 
   app.use(express.static(path.resolve('frontend/dist/frontend')))
-  app.use(cookieParser('kekse'))
-  // vuln-code-snippet end directoryListingChallenge accessLogDisclosureChallenge
+  app.use(cookieParser(process.env.COOKIE_SECRET ?? require('node:crypto').randomBytes(32).toString('hex')))
 
   /* Serve vendor dependencies locally instead of from CDN */
   app.use('/vendor/material-design-lite', express.static(path.resolve('node_modules/material-design-lite/dist')))
@@ -304,25 +298,19 @@ restoreOverwrittenFilesWithOriginals().then(() => {
   })
   app.use(i18n.init)
 
-  app.use(bodyParser.urlencoded({ extended: true }))
+  app.use(bodyParser.urlencoded({ extended: true, limit: '100kb' }))
   /* File Upload */
   app.post('/file-upload', uploadToMemory.single('file'), ensureFileIsPassed, metrics.observeFileUploadMetricsMiddleware(), checkUploadSize, checkFileType, handleZipFileUpload, handleXmlUpload, handleYamlUpload)
   app.post('/profile/image/file', uploadToMemory.single('file'), ensureFileIsPassed, metrics.observeFileUploadMetricsMiddleware(), profileImageFileUpload())
   app.post('/profile/image/url', uploadToMemory.single('file'), profileImageUrlUpload())
   app.post('/rest/memories', uploadToDisk.single('image'), ensureFileIsPassed, security.appendUserId(), metrics.observeFileUploadMetricsMiddleware(), addMemory())
 
-  app.use(bodyParser.text({ type: '*/*' }))
-  app.use(function jsonParser (req: Request, res: Response, next: NextFunction) {
-    // @ts-expect-error FIXME intentionally saving original request in this property
+  // Tight content-type handling: only parse JSON for application/json,
+  // and cap body size to avoid DoS via huge bodies.
+  app.use(bodyParser.json({ limit: '100kb' }))
+  app.use(function rawBodyKeeper (req: Request, res: Response, next: NextFunction) {
+    // @ts-expect-error keep a reference to the parsed body for legacy callers
     req.rawBody = req.body
-    if (req.headers['content-type']?.includes('application/json')) {
-      if (!req.body) {
-        req.body = {}
-      }
-      if (req.body !== Object(req.body)) { // Expensive workaround for 500 errors during Frisby test run (see #640)
-        req.body = JSON.parse(req.body)
-      }
-    }
     next()
   })
 
@@ -337,15 +325,21 @@ restoreOverwrittenFilesWithOriginals().then(() => {
   })
   app.use(morgan('combined', { stream: accessLogStream }))
 
-  // vuln-code-snippet start resetPasswordMortyChallenge
-  /* Rate limiting */
-  app.enable('trust proxy')
-  app.use('/rest/user/reset-password', rateLimit({
-    windowMs: 5 * 60 * 1000,
-    max: 100,
-    keyGenerator ({ headers, ip }: { headers: any, ip: any }) { return headers['X-Forwarded-For'] ?? ip } // vuln-code-snippet vuln-line resetPasswordMortyChallenge
-  }))
-  // vuln-code-snippet end resetPasswordMortyChallenge
+  /* Rate limiting — only one trusted proxy hop, no header-spoofable keys. */
+  app.set('trust proxy', 1)
+  const limiter = (windowMs: number, max: number) => rateLimit({
+    windowMs,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false
+  })
+  app.use('/rest/user/login', limiter(5 * 60 * 1000, 20))
+  app.use('/rest/user/reset-password', limiter(15 * 60 * 1000, 10))
+  app.use('/rest/user/change-password', limiter(15 * 60 * 1000, 20))
+  app.use('/rest/user/security-question', limiter(15 * 60 * 1000, 30))
+  app.use('/api/Users', limiter(60 * 60 * 1000, 30))
+  app.use('/api/Feedbacks', limiter(15 * 60 * 1000, 30))
+  app.use('/b2b/v2', limiter(15 * 60 * 1000, 60))
 
   // vuln-code-snippet start changeProductChallenge
   /** Authorization **/
@@ -358,15 +352,16 @@ restoreOverwrittenFilesWithOriginals().then(() => {
   app.use('/api/BasketItems/:id', security.isAuthorized())
   /* Feedbacks: GET allowed for feedback carousel, POST allowed in order to provide feedback without being logged in */
   app.use('/api/Feedbacks/:id', security.isAuthorized())
-  /* Users: Only POST is allowed in order to register a new user */
-  app.get('/api/Users', security.isAuthorized())
+  /* Users: Only POST is allowed in order to register a new user.
+     Listing / reading users is admin-only. */
+  app.get('/api/Users', security.isAdmin())
   app.route('/api/Users/:id')
-    .get(security.isAuthorized())
+    .get(security.isAdmin())
     .put(security.denyAll())
     .delete(security.denyAll())
-  /* Products: Only GET is allowed in order to view products */ // vuln-code-snippet neutral-line changeProductChallenge
-  app.post('/api/Products', security.isAuthorized()) // vuln-code-snippet neutral-line changeProductChallenge
-  // app.put('/api/Products/:id', security.isAuthorized()) // vuln-code-snippet vuln-line changeProductChallenge
+  /* Products: GET is public; mutations are admin-only. */
+  app.post('/api/Products', security.isAdmin())
+  app.put('/api/Products/:id', security.isAdmin())
   app.delete('/api/Products/:id', security.denyAll())
   /* Challenges: GET list of challenges allowed. Everything else forbidden entirely */
   app.post('/api/Challenges', security.denyAll())
@@ -671,9 +666,16 @@ restoreOverwrittenFilesWithOriginals().then(() => {
 
   app.use(serveAngularClient())
 
-  /* Error Handling */
+  /* Error Handling — never leak stacks or internal messages to clients. */
   app.use(verify.errorHandlingChallenge())
-  app.use(errorhandler())
+  app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
+    logger.warn(`Request error on ${req.method} ${req.originalUrl}: ${utils.getErrorMessage(err)}`)
+    if (res.headersSent) return
+    const explicit = typeof err?.status === 'number' ? err.status : null
+    const preset = res.statusCode && res.statusCode >= 400 ? res.statusCode : null
+    const status = explicit ?? preset ?? 500
+    res.status(status).json({ error: status >= 500 ? 'Internal Server Error' : (err?.message ?? 'Error') })
+  })
 }).catch((err) => {
   console.error(err)
 })
@@ -711,11 +713,10 @@ while (!expectedModels.every(model => Object.keys(sequelize.models).includes(mod
 }
 logger.info(`Entity models ${colors.bold(Object.keys(sequelize.models).length.toString())} of ${colors.bold(expectedModels.length.toString())} are initialized (${colors.green('OK')})`)
 
-// vuln-code-snippet start exposedMetricsChallenge
-/* Serve metrics */
+/* Serve metrics — admin-only, never publicly exposed. */
 let metricsUpdateLoop: any
-const Metrics = metrics.observeMetrics() // vuln-code-snippet neutral-line exposedMetricsChallenge
-app.get('/metrics', metrics.serveMetrics()) // vuln-code-snippet vuln-line exposedMetricsChallenge
+const Metrics = metrics.observeMetrics()
+app.get('/metrics', security.isAdmin(), metrics.serveMetrics())
 errorhandler.title = `${config.get<string>('application.name')} (Express ${utils.version('express')})`
 
 export async function start (readyCallback?: () => void) {
@@ -753,7 +754,6 @@ export function close (exitCode: number | undefined) {
     process.exit(exitCode)
   }
 }
-// vuln-code-snippet end exposedMetricsChallenge
 
 // stop server on sigint or sigterm signals
 process.on('SIGINT', () => { close(0) })

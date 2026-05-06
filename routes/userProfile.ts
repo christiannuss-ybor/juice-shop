@@ -9,9 +9,7 @@ import config from 'config'
 import pug from 'pug'
 import fs from 'node:fs/promises'
 
-import * as challengeUtils from '../lib/challengeUtils'
 import { themes } from '../views/themes/themes'
-import { challenges } from '../data/datacache'
 import * as security from '../lib/insecurity'
 import { UserModel } from '../models/user'
 import * as utils from '../lib/utils'
@@ -34,7 +32,7 @@ export function getUserProfile () {
 
     const loggedInUser = security.authenticatedUsers.get(req.cookies.token)
     if (!loggedInUser) {
-      next(new Error('Blocked illegal activity by ' + req.socket.remoteAddress)); return
+      next(new Error('Authentication required')); return
     }
 
     let user: UserModel | null
@@ -46,34 +44,20 @@ export function getUserProfile () {
     }
 
     if (!user) {
-      next(new Error('Blocked illegal activity by ' + req.socket.remoteAddress))
+      next(new Error('User not found'))
       return
     }
 
-    let username = user.username
-
-    if (username?.match(/#{(.*)}/) !== null && utils.isChallengeEnabled(challenges.usernameXssChallenge)) {
-      req.app.locals.abused_ssti_bug = true
-      const code = username?.substring(2, username.length - 1)
-      try {
-        if (!code) {
-          throw new Error('Username is null')
-        }
-        username = eval(code) // eslint-disable-line no-eval
-      } catch (err) {
-        username = '\\' + username
-      }
-    } else {
-      username = '\\' + username
-    }
+    // The username is rendered into a Pug template; treat it as opaque text
+    // and HTML-encode it so neither template syntax (`#{...}`) nor markup is
+    // ever interpreted server-side.
+    const safeUsername = entities.encode(user.username ?? '')
 
     const themeKey = config.get<string>('application.theme') as keyof typeof themes
     const theme = themes[themeKey] || themes['bluegrey-lightgreen']
 
-    if (username) {
-      template = template.replace(/_username_/g, username)
-    }
-    template = template.replace(/_emailHash_/g, security.hash(user?.email))
+    template = template.replace(/_username_/g, safeUsername)
+    template = template.replace(/_emailHash_/g, security.hash(user.email ?? ''))
     template = template.replace(/_title_/g, entities.encode(config.get<string>('application.name')))
     template = template.replace(/_favicon_/g, favicon())
     template = template.replace(/_bgColor_/g, theme.bgColor)
@@ -85,19 +69,13 @@ export function getUserProfile () {
 
     try {
       const fn = pug.compile(template)
-      const CSP = `img-src 'self' ${user?.profileImage}; script-src 'self' 'unsafe-eval'`
-
-      challengeUtils.solveIf(challenges.usernameXssChallenge, () => {
-        return username && user?.profileImage.match(/;[ ]*script-src(.)*'unsafe-inline'/g) !== null && utils.contains(username, '<script>alert(`xss`)</script>')
-      })
-
+      // No `unsafe-eval` and no per-user host injection.
       res.set({
-        'Content-Security-Policy': CSP
+        'Content-Security-Policy': "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
       })
-
       res.send(fn(user))
     } catch (err) {
-      next(new Error('Blocked illegal activity by ' + req.socket.remoteAddress))
+      next(new Error('Failed to render profile'))
     }
   }
 }
