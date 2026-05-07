@@ -3,13 +3,10 @@
  * SPDX-License-Identifier: MIT
  */
 
-import fs from 'node:fs'
 import crypto from 'node:crypto'
 import { type Request, type Response, type NextFunction } from 'express'
 import { type UserModel } from 'models/user'
-import expressJwt from 'express-jwt'
 import jwt from 'jsonwebtoken'
-import jws from 'jws'
 import sanitizeHtmlLib from 'sanitize-html'
 import sanitizeFilenameLib from 'sanitize-filename'
 import * as utils from './utils'
@@ -19,8 +16,20 @@ import * as utils from './utils'
 // @ts-expect-error FIXME no typescript definitions for z85 :(
 import * as z85 from 'z85'
 
-export const publicKey = fs ? fs.readFileSync('encryptionkeys/jwt.pub', 'utf8') : 'placeholder-public-key'
-const privateKey = '-----BEGIN RSA PRIVATE KEY-----\r\nMIICXAIBAAKBgQDNwqLEe9wgTXCbC7+RPdDbBbeqjdbs4kOPOIGzqLpXvJXlxxW8iMz0EaM4BKUqYsIa+ndv3NAn2RxCd5ubVdJJcX43zO6Ko0TFEZx/65gY3BE0O6syCEmUP4qbSd6exou/F+WTISzbQ5FBVPVmhnYhG/kpwt/cIxK5iUn5hm+4tQIDAQABAoGBAI+8xiPoOrA+KMnG/T4jJsG6TsHQcDHvJi7o1IKC/hnIXha0atTX5AUkRRce95qSfvKFweXdJXSQ0JMGJyfuXgU6dI0TcseFRfewXAa/ssxAC+iUVR6KUMh1PE2wXLitfeI6JLvVtrBYswm2I7CtY0q8n5AGimHWVXJPLfGV7m0BAkEA+fqFt2LXbLtyg6wZyxMA/cnmt5Nt3U2dAu77MzFJvibANUNHE4HPLZxjGNXN+a6m0K6TD4kDdh5HfUYLWWRBYQJBANK3carmulBwqzcDBjsJ0YrIONBpCAsXxk8idXb8jL9aNIg15Wumm2enqqObahDHB5jnGOLmbasizvSVqypfM9UCQCQl8xIqy+YgURXzXCN+kwUgHinrutZms87Jyi+D8Br8NY0+Nlf+zHvXAomD2W5CsEK7C+8SLBr3k/TsnRWHJuECQHFE9RA2OP8WoaLPuGCyFXaxzICThSRZYluVnWkZtxsBhW2W8z1b8PvWUE7kMy7TnkzeJS2LSnaNHoyxi7IaPQUCQCwWU4U+v4lD7uYBw00Ga/xt+7+UqFPlPVdz1yyr4q24Zxaw0LgmuEvgU5dycq8N7JxjTubX0MIRR+G9fmDBBl8=\r\n-----END RSA PRIVATE KEY-----'
+// Generate a fresh RSA keypair on every process start. Tokens become invalid on
+// restart (acceptable trade-off) and the private key never touches disk.
+const keyPair = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+  privateKeyEncoding: { type: 'pkcs1', format: 'pem' }
+})
+const privateKey = keyPair.privateKey
+export const publicKey = keyPair.publicKey
+
+// HMAC secret comes from env in production deployments; otherwise a strong
+// per-process random value. The DB is re-seeded on every startup, so HMAC'd
+// security answers stay consistent within a process lifetime.
+const hmacSecret = process.env.JUICE_SHOP_HMAC_SECRET ?? crypto.randomBytes(48).toString('hex')
 
 interface ResponseWithUser {
   status?: string
@@ -40,8 +49,38 @@ interface IAuthenticatedUsers {
   updateFrom: (req: Request, user: ResponseWithUser) => any
 }
 
-export const hash = (data: string) => crypto.createHash('md5').update(data).digest('hex')
-export const hmac = (data: string) => crypto.createHmac('sha256', 'pa4qacea4VK9t9nGv7yZtwmj').update(data).digest('hex')
+// Non-secret short fingerprint used in order IDs etc. Switched off MD5 to SHA-256.
+export const hash = (data: string) => crypto.createHash('sha256').update(String(data ?? '')).digest('hex')
+export const hmac = (data: string) => crypto.createHmac('sha256', hmacSecret).update(String(data ?? '')).digest('hex')
+
+const SCRYPT_KEYLEN = 64
+const SCRYPT_PREFIX = 'scrypt$'
+
+export const hashPassword = (plain: string): string => {
+  const salt = crypto.randomBytes(16)
+  const derived = crypto.scryptSync(String(plain ?? ''), salt, SCRYPT_KEYLEN)
+  return `${SCRYPT_PREFIX}${salt.toString('hex')}$${derived.toString('hex')}`
+}
+
+export const verifyPassword = (plain: string, stored: string): boolean => {
+  if (typeof stored !== 'string' || !stored) return false
+  if (stored.startsWith(SCRYPT_PREFIX)) {
+    const [, saltHex, hashHex] = stored.split('$')
+    if (!saltHex || !hashHex) return false
+    let salt: Buffer
+    let expected: Buffer
+    try {
+      salt = Buffer.from(saltHex, 'hex')
+      expected = Buffer.from(hashHex, 'hex')
+    } catch {
+      return false
+    }
+    if (expected.length !== SCRYPT_KEYLEN) return false
+    const derived = crypto.scryptSync(String(plain ?? ''), salt, SCRYPT_KEYLEN)
+    return crypto.timingSafeEqual(derived, expected)
+  }
+  return false
+}
 
 export const cutOffPoisonNullByte = (str: string) => {
   const nullByte = '%00'
@@ -51,22 +90,57 @@ export const cutOffPoisonNullByte = (str: string) => {
   return str
 }
 
-export const isAuthorized = () => expressJwt(({ secret: publicKey }) as any)
-export const denyAll = () => expressJwt({ secret: '' + Math.random() } as any)
+// Hand-rolled JWT auth middleware: the bundled `express-jwt@0.1.3` and
+// `jsonwebtoken@0.4` are vulnerable to algorithm-confusion attacks and have
+// CVEs filed against them. This wrapper enforces RS256 explicitly via our
+// strict `verify()` helper.
+export const isAuthorized = () => (req: Request, res: Response, next: NextFunction) => {
+  const token = utils.jwtFrom(req)
+  if (token && verify(token)) {
+    const decoded = decode(token) as any
+    if (decoded) {
+      // express-jwt-compatible: stash the decoded payload on `req.user`.
+      ;(req as any).user = decoded
+      next()
+      return
+    }
+  }
+  res.status(401).json({ error: 'Unauthorized' })
+}
+export const denyAll = () => (_req: Request, res: Response, _next: NextFunction) => {
+  res.status(401).json({ error: 'Unauthorized' })
+}
 export const authorize = (user = {}) => jwt.sign(user, privateKey, { expiresIn: '6h', algorithm: 'RS256' })
-export const verify = (token: string) => token ? (jws.verify as ((token: string, secret: string) => boolean))(token, publicKey) : false
-export const decode = (token: string) => { return jws.decode(token)?.payload }
+export const verify = (token: string) => {
+  if (!token || typeof token !== 'string') return false
+  try {
+    jwt.verify(token, publicKey, { algorithms: ['RS256'] })
+    return true
+  } catch {
+    return false
+  }
+}
+export const decode = (token: string) => {
+  if (!token || typeof token !== 'string') return undefined
+  try {
+    const decoded = jwt.decode(token, { complete: false }) as any
+    return decoded ?? undefined
+  } catch {
+    return undefined
+  }
+}
 
 export const sanitizeHtml = (html: string) => sanitizeHtmlLib(html)
-export const sanitizeLegacy = (input = '') => input.replace(/<(?:\w+)\W+?[\w]/gi, '')
+export const sanitizeLegacy = (input = '') => sanitizeHtmlLib(input, { allowedTags: [], allowedAttributes: {} })
 export const sanitizeFilename = (filename: string) => sanitizeFilenameLib(filename)
 export const sanitizeSecure = (html: string): string => {
-  const sanitized = sanitizeHtml(html)
-  if (sanitized === html) {
-    return html
-  } else {
-    return sanitizeSecure(sanitized)
+  let prev = String(html ?? '')
+  for (let i = 0; i < 4; i++) {
+    const next = sanitizeHtml(prev)
+    if (next === prev) return next
+    prev = next
   }
+  return prev
 }
 
 export const authenticatedUsers: IAuthenticatedUsers = {
@@ -110,22 +184,22 @@ export const discountFromCoupon = (coupon?: string) => {
     const parts = decoded.toString().split('-')
     const validity = parts[0]
     if (utils.toMMMYY(new Date()) === validity) {
-      const discount = parts[1]
-      return parseInt(discount)
+      const discount = parseInt(parts[1], 10)
+      if (Number.isFinite(discount) && discount >= 0 && discount <= 50) {
+        return discount
+      }
     }
   }
+  return undefined
 }
 
 function hasValidFormat (coupon: string) {
-  return coupon.match(/(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[0-9]{2}-[0-9]{2}/)
+  return coupon.match(/^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[0-9]{2}-[0-9]{1,2}$/)
 }
 
-// vuln-code-snippet start redirectCryptoCurrencyChallenge redirectChallenge
+// Strict allowlist: redirects must match an entry exactly (no substring tricks).
 export const redirectAllowlist = new Set([
   'https://github.com/juice-shop/juice-shop',
-  'https://blockchain.info/address/1AbKfgvw9psQ41NbLi8kufDQTezwG8DRZm', // vuln-code-snippet vuln-line redirectCryptoCurrencyChallenge
-  'https://explorer.dash.org/address/Xr556RzuwX6hg5EGpkybbv5RanJoZN17kW', // vuln-code-snippet vuln-line redirectCryptoCurrencyChallenge
-  'https://etherscan.io/address/0x0f933ab9fcaaa782d0279c300d73750e1311eae6', // vuln-code-snippet vuln-line redirectCryptoCurrencyChallenge
   'http://shop.spreadshirt.com/juiceshop',
   'http://shop.spreadshirt.de/juiceshop',
   'https://www.stickeryou.com/products/owasp-juice-shop/794',
@@ -133,13 +207,9 @@ export const redirectAllowlist = new Set([
 ])
 
 export const isRedirectAllowed = (url: string) => {
-  let allowed = false
-  for (const allowedUrl of redirectAllowlist) {
-    allowed = allowed || url.includes(allowedUrl) // vuln-code-snippet vuln-line redirectChallenge
-  }
-  return allowed
+  if (typeof url !== 'string') return false
+  return redirectAllowlist.has(url)
 }
-// vuln-code-snippet end redirectCryptoCurrencyChallenge redirectChallenge
 
 export const roles = {
   customer: 'customer',
@@ -149,8 +219,8 @@ export const roles = {
 }
 
 export const deluxeToken = (email: string) => {
-  const hmac = crypto.createHmac('sha256', privateKey)
-  return hmac.update(email + roles.deluxe).digest('hex')
+  const mac = crypto.createHmac('sha256', hmacSecret)
+  return mac.update(String(email ?? '') + roles.deluxe).digest('hex')
 }
 
 export const isAccounting = () => {
@@ -160,6 +230,17 @@ export const isAccounting = () => {
       next()
     } else {
       res.status(403).json({ error: 'Malicious activity detected' })
+    }
+  }
+}
+
+export const isAdmin = () => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const decodedToken = verify(utils.jwtFrom(req)) && decode(utils.jwtFrom(req))
+    if (decodedToken?.data?.role === roles.admin) {
+      next()
+    } else {
+      res.status(403).json({ error: 'Forbidden' })
     }
   }
 }
@@ -187,15 +268,16 @@ export const appendUserId = () => {
 
 export const updateAuthenticatedUsers = () => (req: Request, res: Response, next: NextFunction) => {
   const token = req.cookies.token || utils.jwtFrom(req)
-  if (token) {
-    jwt.verify(token, publicKey, (err: Error | null, decoded: any) => {
-      if (err === null) {
-        if (authenticatedUsers.get(token) === undefined) {
-          authenticatedUsers.put(token, decoded)
-          res.cookie('token', token)
-        }
-      }
-    })
+  if (token && verify(token)) {
+    const decoded = decode(token) as any
+    if (decoded && authenticatedUsers.get(token) === undefined) {
+      authenticatedUsers.put(token, decoded)
+      res.cookie('token', token, {
+        httpOnly: true,
+        sameSite: 'strict',
+        secure: process.env.NODE_ENV === 'production'
+      })
+    }
   }
   next()
 }

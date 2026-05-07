@@ -235,6 +235,13 @@ export function process () {
       return
     }
 
+    // Reject anything but plain alphanumeric queries — the chatbot's
+    // underlying VM-based runner has historically allowed sandbox escapes.
+    if (typeof req.body.query === 'string') {
+      const cleaned = req.body.query.replace(/[^\p{L}\p{N}\s'.,!?-]+/gu, '').slice(0, 280)
+      req.body.query = cleaned
+    }
+
     if (req.body.action === 'query') {
       await processQuery(user, req, res, next)
     } else if (req.body.action === 'setname') {
@@ -245,7 +252,7 @@ export function process () {
 
 async function getUserFromJwt (token: string): Promise<User | null> {
   return await new Promise((resolve) => {
-    jwt.verify(token, security.publicKey, (err: VerifyErrors | null, decoded: JwtPayload | string | undefined) => {
+    jwt.verify(token, security.publicKey, { algorithms: ['RS256'] }, (err: VerifyErrors | null, decoded: JwtPayload | string | undefined) => {
       if (err !== null || !decoded || isString(decoded)) {
         resolve(null)
       } else {

@@ -6,10 +6,20 @@
 import { type Request, type Response, type NextFunction } from 'express'
 import { CaptchaModel } from '../models/captcha'
 
+type Operator = '*' | '+' | '-'
+
+function applyOp (left: number, right: number, op: Operator): number {
+  switch (op) {
+    case '*': return left * right
+    case '+': return left + right
+    case '-': return left - right
+  }
+}
+
 export function captchas () {
   return async (req: Request, res: Response) => {
     const captchaId = req.app.locals.captchaId++
-    const operators = ['*', '+', '-']
+    const operators: Operator[] = ['*', '+', '-']
 
     const firstTerm = Math.floor((Math.random() * 10) + 1)
     const secondTerm = Math.floor((Math.random() * 10) + 1)
@@ -18,13 +28,21 @@ export function captchas () {
     const firstOperator = operators[Math.floor((Math.random() * 3))]
     const secondOperator = operators[Math.floor((Math.random() * 3))]
 
-    const expression = firstTerm.toString() + firstOperator + secondTerm.toString() + secondOperator + thirdTerm.toString()
-    const answer = eval(expression).toString() // eslint-disable-line no-eval
+    const expression = `${firstTerm}${firstOperator}${secondTerm}${secondOperator}${thirdTerm}`
+    // Operator-precedence aware evaluation without `eval`.
+    let answer: number
+    if (firstOperator === '*' && secondOperator !== '*') {
+      answer = applyOp(applyOp(firstTerm, secondTerm, firstOperator), thirdTerm, secondOperator)
+    } else if (firstOperator !== '*' && secondOperator === '*') {
+      answer = applyOp(firstTerm, applyOp(secondTerm, thirdTerm, secondOperator), firstOperator)
+    } else {
+      answer = applyOp(applyOp(firstTerm, secondTerm, firstOperator), thirdTerm, secondOperator)
+    }
 
     const captcha = {
       captchaId,
       captcha: expression,
-      answer
+      answer: answer.toString()
     }
     const captchaInstance = CaptchaModel.build(captcha)
     await captchaInstance.save()
