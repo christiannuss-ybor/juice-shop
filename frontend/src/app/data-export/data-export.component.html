@@ -26,7 +26,9 @@
           <div>
             <div>
               <span class="captcha-label" translate>CAPTCHA <span>:</span></span>
-              <div class="captcha-image" [innerHTML]="captcha"></div>
+              <div class="captcha-image">
+                @if (captcha) {<img alt="CAPTCHA" [src]="captcha" />}
+              </div>
             </div>
             <mat-form-field class="captcha-input-field" appearance="outline" color="accent">
               <mat-label translate>ENTER_CAPTCHA</mat-label>

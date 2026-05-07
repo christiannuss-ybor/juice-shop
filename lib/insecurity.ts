@@ -97,7 +97,7 @@ export const cutOffPoisonNullByte = (str: string) => {
 export const isAuthorized = () => (req: Request, res: Response, next: NextFunction) => {
   const token = utils.jwtFrom(req)
   if (token && verify(token)) {
-    const decoded = decode(token) as any
+    const decoded = decode(token)
     if (decoded) {
       // express-jwt-compatible: stash the decoded payload on `req.user`.
       ;(req as any).user = decoded
@@ -269,7 +269,7 @@ export const appendUserId = () => {
 export const updateAuthenticatedUsers = () => (req: Request, res: Response, next: NextFunction) => {
   const token = req.cookies.token || utils.jwtFrom(req)
   if (token && verify(token)) {
-    const decoded = decode(token) as any
+    const decoded = decode(token)
     if (decoded && authenticatedUsers.get(token) === undefined) {
       authenticatedUsers.put(token, decoded)
       res.cookie('token', token, {
